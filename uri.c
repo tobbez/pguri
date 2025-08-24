@@ -26,8 +26,8 @@ typedef struct varlena uritype;
 #define PG_RETURN_URI_P(x)	PG_RETURN_POINTER(x)
 
 
-static void
-parse_uri(const char *s, UriUriA *urip)
+static int
+parse_uri(const char *s, UriUriA *urip, int failure_critical)
 {
 	UriParserStateA state;
 
@@ -37,40 +37,32 @@ parse_uri(const char *s, UriUriA *urip)
 	switch (state.errorCode)
 	{
 		case URI_SUCCESS:
-			return;
+			return 0;
 		case URI_ERROR_SYNTAX:
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-					 errmsg("invalid input syntax for type uri at or near \"%s\"",
-							state.errorPos)));
-			break;
+			if (failure_critical) {
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+						 errmsg("invalid input syntax for type uri at or near \"%s\"",
+								state.errorPos)));
+			}
+			return 1;
 		default:
 			elog(ERROR, "liburiparser error code %d", state.errorCode);
 	}
 }
 
-PG_FUNCTION_INFO_V1(uri_in);
-Datum
-uri_in(PG_FUNCTION_ARGS)
+/* Report an error to the user if the uri fails to parse (this used to be the only behaviour) */
+static int
+parse_uri_error(const char *s, UriUriA *urip)
 {
-	char *s = PG_GETARG_CSTRING(0);
-	uritype *vardata;
-	UriUriA uri;
-
-	parse_uri(s, &uri);
-	uriFreeUriMembersA(&uri);
-
-	vardata = (uritype *) cstring_to_text(s);
-	PG_RETURN_URI_P(vardata);
+	return parse_uri(s, urip, 1);
 }
 
-PG_FUNCTION_INFO_V1(uri_out);
-Datum
-uri_out(PG_FUNCTION_ARGS)
+/* Do not report an error to the user if the uri fails to parse */
+static int
+parse_uri_noerror(const char *s, UriUriA *urip)
 {
-	Datum arg = PG_GETARG_DATUM(0);
-
-	PG_RETURN_CSTRING(TextDatumGetCString(arg));
+	return parse_uri(s, urip, 0);
 }
 
 static text *
@@ -91,7 +83,7 @@ uri_scheme(PG_FUNCTION_ARGS)
 	UriUriA uri;
 	text *result;
 
-	parse_uri(s, &uri);
+	parse_uri_noerror(s, &uri);
 	result = uri_text_range_to_text(uri.scheme);
 	uriFreeUriMembersA(&uri);
 	if (result)
@@ -109,7 +101,7 @@ uri_userinfo(PG_FUNCTION_ARGS)
 	UriUriA uri;
 	text *result;
 
-	parse_uri(s, &uri);
+	parse_uri_noerror(s, &uri);
 	result = uri_text_range_to_text(uri.userInfo);
 	uriFreeUriMembersA(&uri);
 	if (result)
@@ -127,7 +119,7 @@ uri_host(PG_FUNCTION_ARGS)
 	UriUriA uri;
 	text *result;
 
-	parse_uri(s, &uri);
+	parse_uri_noerror(s, &uri);
 	result = uri_text_range_to_text(uri.hostText);
 	uriFreeUriMembersA(&uri);
 	if (result)
@@ -144,7 +136,7 @@ uri_host_inet(PG_FUNCTION_ARGS)
 	char *s = TextDatumGetCString(arg);
 	UriUriA uri;
 
-	parse_uri(s, &uri);
+	parse_uri_noerror(s, &uri);
 	if (uri.hostData.ip4)
 	{
 		unsigned char *data = uri.hostData.ip4->data;
@@ -191,7 +183,7 @@ uri_port(PG_FUNCTION_ARGS)
 	UriUriA uri;
 	int num;
 
-	parse_uri(s, &uri);
+	parse_uri_noerror(s, &uri);
 	num = _uri_port_num(&uri);
 	uriFreeUriMembersA(&uri);
 	if (num < 0)
@@ -208,7 +200,7 @@ uri_query(PG_FUNCTION_ARGS)
 	UriUriA uri;
 	text *result;
 
-	parse_uri(s, &uri);
+	parse_uri_noerror(s, &uri);
 	result = uri_text_range_to_text(uri.query);
 	uriFreeUriMembersA(&uri);
 	if (result)
@@ -228,7 +220,7 @@ uri_query_json(PG_FUNCTION_ARGS)
 	int itemCount;
 	StringInfoData dst;
 
-	parse_uri(s, &uri);
+	parse_uri_noerror(s, &uri);
 	if(uriDissectQueryMallocA(&queryList, &itemCount,
 	  uri.query.first, uri.query.afterLast) == URI_SUCCESS) {
 	  UriQueryListA *p = queryList;
@@ -260,7 +252,7 @@ uri_fragment(PG_FUNCTION_ARGS)
 	UriUriA uri;
 	text *result;
 
-	parse_uri(s, &uri);
+	parse_uri_noerror(s, &uri);
 	result = uri_text_range_to_text(uri.fragment);
 	uriFreeUriMembersA(&uri);
 	if (result)
@@ -296,7 +288,7 @@ uri_path(PG_FUNCTION_ARGS)
 
 	initStringInfo(&buf);
 
-	parse_uri(s, &uri);
+	parse_uri_noerror(s, &uri);
 
 	if (uri.absolutePath || (_is_host_set(&uri) && uri.pathHead))
 		appendStringInfoChar(&buf, '/');
@@ -322,7 +314,7 @@ uri_path_array(PG_FUNCTION_ARGS)
 	ArrayBuildState *astate = NULL;
 	UriPathSegmentA *pa;
 
-	parse_uri(s, &uri);
+	parse_uri_noerror(s, &uri);
 	for (pa = uri.pathHead; pa; pa = pa->next)
 	{
 		text *piece = uri_text_range_to_text(pa->text);
@@ -351,7 +343,7 @@ uri_normalize(PG_FUNCTION_ARGS)
 	int charsRequired;
 	char *ret;
 
-	parse_uri(s, &uri);
+	parse_uri_noerror(s, &uri);
 
 	if ((rc = uriNormalizeSyntaxA(&uri)) != URI_SUCCESS)
 		elog(ERROR, "uriNormalizeSyntaxA() failed: error code %d", rc);
@@ -367,232 +359,6 @@ uri_normalize(PG_FUNCTION_ARGS)
 	uriFreeUriMembersA(&uri);
 
 	PG_RETURN_URI_P((uritype *) cstring_to_text(ret));
-}
-
-static int
-strcasecmp_ascii(const char *s1, const char *s2)
-{
-	for (;;)
-	{
-		unsigned char ch1 = (unsigned char) *s1++;
-		unsigned char ch2 = (unsigned char) *s2++;
-
-		if (ch1 != ch2)
-		{
-			if (ch1 >= 'A' && ch1 <= 'Z')
-				ch1 += 'a' - 'A';
-
-			if (ch2 >= 'A' && ch2 <= 'Z')
-				ch2 += 'a' - 'A';
-
-			if (ch1 != ch2)
-				return (int) ch1 - (int) ch2;
-		}
-		if (ch1 == 0)
-			break;
-	}
-	return 0;
-}
-
-static int
-strncasecmp_ascii(const char *s1, const char *s2, size_t n)
-{
-	while (n-- > 0)
-	{
-		unsigned char ch1 = (unsigned char) *s1++;
-		unsigned char ch2 = (unsigned char) *s2++;
-
-		if (ch1 != ch2)
-		{
-			if (ch1 >= 'A' && ch1 <= 'Z')
-				ch1 += 'a' - 'A';
-
-			if (ch2 >= 'A' && ch2 <= 'Z')
-				ch2 += 'a' - 'A';
-
-			if (ch1 != ch2)
-				return (int) ch1 - (int) ch2;
-		}
-		if (ch1 == 0)
-			break;
-	}
-	return 0;
-}
-
-static int
-cmp_text_range(UriTextRangeA a, UriTextRangeA b)
-{
-	if (!a.first || !a.afterLast)
-	{
-		if (!b.first || !b.afterLast)
-			return 0;
-		else
-			return -1;
-	}
-	else if (!b.first || !b.afterLast)
-		return 1;
-	else
-	{
-		int x = strncasecmp_ascii(a.first, b.first,
-								  Min(a.afterLast - a.first, b.afterLast - b.first));
-		if (x == 0)
-			return (a.afterLast - a.first) - (b.afterLast - b.first);
-		return x;
-	}
-}
-
-static int
-cmp_hosts(UriUriA *uap, UriUriA *ubp)
-{
-	if (!uap->hostText.first)
-	{
-		if (!ubp->hostText.first)
-			return 0;
-		else
-			return -1;
-	}
-	else if (uap->hostData.ip4)
-	{
-		if (!ubp->hostText.first)
-			return 1;
-		else if (ubp->hostData.ip4)
-			return memcmp(uap->hostData.ip4->data,
-						  ubp->hostData.ip4->data,
-						  sizeof(uap->hostData.ip4->data));
-		else
-			return -1;
-	}
-	else if (uap->hostData.ip6)
-	{
-		if (!ubp->hostText.first)
-			return 1;
-		else if (ubp->hostData.ip4)
-			return 1;
-		else if (ubp->hostData.ip6)
-			return memcmp(uap->hostData.ip6->data,
-						  ubp->hostData.ip6->data,
-						  sizeof(uap->hostData.ip6->data));
-		else
-			return -1;
-	}
-	else
-		return cmp_text_range(uap->hostText, ubp->hostText);
-}
-
-static int
-_uri_cmp(Datum a, Datum b)
-{
-	const char *sa = TextDatumGetCString(a);
-	const char *sb = TextDatumGetCString(b);
-	UriUriA ua;
-	UriUriA ub;
-	int res = 0;
-
-	parse_uri(sa, &ua);
-	parse_uri(sb, &ub);
-
-	if (res == 0)
-		res = cmp_text_range(ua.scheme, ub.scheme);
-	if (res == 0)
-		res = cmp_hosts(&ua, &ub);
-	if (res == 0)
-		res = _uri_port_num(&ua) - _uri_port_num(&ub);
-	if (res == 0)
-		res = cmp_text_range(ua.userInfo, ub.userInfo);
-	if (res == 0)
-		res = strcasecmp_ascii(sa, sb);
-	if (res == 0)
-		res = strcmp(sa, sb);
-	uriFreeUriMembersA(&ua);
-	uriFreeUriMembersA(&ub);
-
-	return res;
-}
-
-PG_FUNCTION_INFO_V1(uri_lt);
-Datum
-uri_lt(PG_FUNCTION_ARGS)
-{
-	Datum arg1 = PG_GETARG_DATUM(0);
-	Datum arg2 = PG_GETARG_DATUM(1);
-
-	PG_RETURN_BOOL(_uri_cmp(arg1, arg2) < 0);
-}
-
-PG_FUNCTION_INFO_V1(uri_le);
-Datum
-uri_le(PG_FUNCTION_ARGS)
-{
-	Datum arg1 = PG_GETARG_DATUM(0);
-	Datum arg2 = PG_GETARG_DATUM(1);
-
-	PG_RETURN_BOOL(_uri_cmp(arg1, arg2) <= 0);
-}
-
-PG_FUNCTION_INFO_V1(uri_eq);
-Datum
-uri_eq(PG_FUNCTION_ARGS)
-{
-	Datum arg1 = PG_GETARG_DATUM(0);
-	Datum arg2 = PG_GETARG_DATUM(1);
-
-	PG_RETURN_BOOL(_uri_cmp(arg1, arg2) == 0);
-}
-
-PG_FUNCTION_INFO_V1(uri_ne);
-Datum
-uri_ne(PG_FUNCTION_ARGS)
-{
-	Datum arg1 = PG_GETARG_DATUM(0);
-	Datum arg2 = PG_GETARG_DATUM(1);
-
-	PG_RETURN_BOOL(_uri_cmp(arg1, arg2) != 0);
-}
-
-PG_FUNCTION_INFO_V1(uri_ge);
-Datum
-uri_ge(PG_FUNCTION_ARGS)
-{
-	Datum arg1 = PG_GETARG_DATUM(0);
-	Datum arg2 = PG_GETARG_DATUM(1);
-
-	PG_RETURN_BOOL(_uri_cmp(arg1, arg2) >= 0);
-}
-
-PG_FUNCTION_INFO_V1(uri_gt);
-Datum
-uri_gt(PG_FUNCTION_ARGS)
-{
-	Datum arg1 = PG_GETARG_DATUM(0);
-	Datum arg2 = PG_GETARG_DATUM(1);
-
-	PG_RETURN_BOOL(_uri_cmp(arg1, arg2) > 0);
-}
-
-PG_FUNCTION_INFO_V1(uri_cmp);
-Datum
-uri_cmp(PG_FUNCTION_ARGS)
-{
-	Datum arg1 = PG_GETARG_DATUM(0);
-	Datum arg2 = PG_GETARG_DATUM(1);
-
-	PG_RETURN_INT32(_uri_cmp(arg1, arg2));
-}
-
-PG_FUNCTION_INFO_V1(uri_hash);
-Datum
-uri_hash(PG_FUNCTION_ARGS)
-{
-	uritype	   *key = PG_GETARG_URI_PP(0);
-	Datum		result;
-
-	result = hash_any((unsigned char *) VARDATA_ANY(key),
-					  VARSIZE_ANY_EXHDR(key));
-
-	/* Avoid leaking memory for toasted inputs */
-	PG_FREE_IF_COPY(key, 0);
-
-	return result;
 }
 
 PG_FUNCTION_INFO_V1(uri_escape);
